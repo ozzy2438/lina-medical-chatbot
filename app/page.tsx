@@ -2,63 +2,101 @@
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 
-type Message = {
-  id: number;
-  sender: 'lina' | 'user';
-  text: string;
-  urgent?: boolean;
-};
+type Role = 'user' | 'assistant';
+type Message = { id: string; role: Role; content: string; mode?: string };
 
 const starterMessages: Message[] = [
   {
-    id: 1,
-    sender: 'lina',
-    text: 'Hi, I’m Lina. I can offer calm, simple first-aid guidance for everyday minor injuries. What happened?',
+    id: 'welcome',
+    role: 'assistant',
+    content:
+      'Hi, I am Lina. I can offer calm, evidence-based first-aid guidance for everyday home injuries. I use a layered safety gate, an intent classifier, and a retrieval-augmented knowledge base sourced from Red Cross, NHS, CDC, Mayo Clinic, and MedlinePlus. What happened?',
   },
 ];
 
-const prompts = ['I cut my finger', 'I burned my hand', 'I twisted my ankle', 'My nose is bleeding'];
+const prompts = [
+  'I cut my finger while cooking',
+  'I burned my hand on the stove',
+  'I twisted my ankle',
+  'My nose is bleeding',
+  'I got dust in my eye',
+  'My child has a small friction blister',
+];
+
+function makeId() {
+  return Math.random().toString(36).slice(2, 10);
+}
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>(starterMessages);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<string>('');
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+  const [health, setHealth] = useState<any>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
+  useEffect(() => {
+    fetch('/api/health').then((r) => r.json()).then(setHealth).catch(() => {});
+  }, []);
+
   async function sendMessage(rawText = input) {
     const text = rawText.trim();
     if (!text || loading) return;
 
-    const userMessage: Message = { id: Date.now(), sender: 'user', text };
-    setMessages((current) => [...current, userMessage]);
+    const userMsg: Message = { id: makeId(), role: 'user', content: text };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     setInput('');
     setLoading(true);
+
+    const assistantId = makeId();
+    setMessages((current) => [...current, { id: assistantId, role: 'assistant', content: '' }]);
 
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          sessionId,
+          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
       });
-      const data = await response.json();
-      setMessages((current) => [
-        ...current,
-        { id: Date.now() + 1, sender: 'lina', text: data.message, urgent: data.urgent },
-      ]);
-    } catch {
-      setMessages((current) => [
-        ...current,
-        {
-          id: Date.now() + 1,
-          sender: 'lina',
-          text: 'I’m having a small technical hiccup. Please try again. If this is an emergency, call local emergency services now.',
-          urgent: true,
-        },
-      ]);
+
+      const receivedMode = response.headers.get('x-lina-mode') ?? '';
+      setMode(receivedMode);
+      const receivedSession = response.headers.get('x-lina-session');
+      if (receivedSession) setSessionId(receivedSession);
+
+      if (!response.body) throw new Error('No response body');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let acc = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        setMessages((current) =>
+          current.map((m) => (m.id === assistantId ? { ...m, content: acc, mode: receivedMode } : m)),
+        );
+      }
+    } catch (err) {
+      setMessages((current) =>
+        current.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content:
+                  'I ran into a technical hiccup. Please try again in a moment. If this is an emergency, contact local emergency services now.',
+              }
+            : m,
+        ),
+      );
     } finally {
       setLoading(false);
     }
@@ -76,30 +114,43 @@ export default function Home() {
     }
   }
 
+  const modeLabel = mode
+    ? mode.startsWith('llm')
+      ? 'LLM + RAG'
+      : mode.startsWith('deterministic')
+      ? 'Deterministic + RAG'
+      : mode
+    : health?.llm?.enabled
+    ? 'LLM ready'
+    : 'Deterministic mode';
+
   return (
     <main>
       <section className="chat-card" aria-label="Lina injury helper">
         <header className="header">
           <div className="avatar" aria-hidden="true">L</div>
-          <div>
-            <p className="eyebrow">Everyday injury helper</p>
+          <div className="header-text">
+            <p className="eyebrow">Everyday injury helper \u00b7 v2</p>
             <h1>Lina</h1>
-            <p className="status"><span /> Here to help</p>
+            <p className="status">
+              <span /> {modeLabel}
+              {health?.intents ? ` \u00b7 ${health.intents.count} intents` : ''}
+              {health?.corpus ? ` \u00b7 ${health.corpus.chunks} passages` : ''}
+            </p>
           </div>
         </header>
 
         <aside className="safety-note" aria-label="Important safety note">
-          <strong>For emergencies:</strong> call local emergency services now for trouble breathing, choking, unconsciousness, possible poisoning, or bleeding that will not stop.
+          <strong>For emergencies:</strong> call local emergency services now for trouble breathing, choking, unconsciousness, possible poisoning, chemical splash to the eye, or bleeding that will not stop. This chatbot is educational, not a diagnosis.
         </aside>
 
         <div className="conversation" aria-live="polite" aria-label="Chat conversation">
           {messages.map((message) => (
-            <article key={message.id} className={`message ${message.sender} ${message.urgent ? 'urgent' : ''}`}>
-              <span className="speaker">{message.sender === 'lina' ? 'Lina' : 'You'}</span>
-              <p>{message.text}</p>
+            <article key={message.id} className={`message ${message.role}`}>
+              <span className="speaker">{message.role === 'assistant' ? 'Lina' : 'You'}</span>
+              <p>{message.content || (message.role === 'assistant' && loading ? 'Thinking\u2026' : '')}</p>
             </article>
           ))}
-          {loading && <article className="message lina typing"><span className="speaker">Lina</span><p>Thinking…</p></article>}
           <div ref={chatEndRef} />
         </div>
 
@@ -127,7 +178,9 @@ export default function Home() {
               Send
             </button>
           </div>
-          <p className="hint">Press Enter to send, or Shift + Enter for a new line. Lina gives general first-aid information, not a medical diagnosis.</p>
+          <p className="hint">
+            Press Enter to send, Shift + Enter for a new line. Lina gives general first-aid information sourced from Red Cross, NHS, CDC, Mayo Clinic, and MedlinePlus. It is not a diagnosis.
+          </p>
         </form>
       </section>
     </main>
